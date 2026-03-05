@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DARRAYH
+#define DARRAYH
 
 // interfaces of Dynamic Array class DArray
 class DArray {
@@ -33,3 +34,4 @@ private:
 	void Init(); // initilize the array
 	void Free(); // free the array
 };
+#endif

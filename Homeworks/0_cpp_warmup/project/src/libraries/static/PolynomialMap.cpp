@@ -6,9 +6,10 @@
 #include <cmath>
 
 using namespace std;
+const double eps=1e-10;
 
 PolynomialMap::PolynomialMap(const PolynomialMap& other) {
-    // TODO
+    m_Polynomial=other.m_Polynomial;
 }
 
 PolynomialMap::PolynomialMap(const string& file) {
@@ -16,55 +17,121 @@ PolynomialMap::PolynomialMap(const string& file) {
 }
 
 PolynomialMap::PolynomialMap(const double* cof, const int* deg, int n) {
-	// TODO
+    assert(n>=0);
+
+    for (int i=0;i<n;++i){
+        coff(deg[i])=cof[i];
+    }
 }
 
 PolynomialMap::PolynomialMap(const vector<int>& deg, const vector<double>& cof) {
 	assert(deg.size() == cof.size());
-	// TODO
+
+    for (int i=min(deg.size(),cof.size())-1;i>=0;--i){
+        coff(deg[i])=cof[i];
+    }
 }
 
 double PolynomialMap::coff(int i) const {
-	// TODO
-	return 0.f; // you should return a correct value
+	auto target = m_Polynomial.find(i);
+    if (target == m_Polynomial.end())
+        return 0.;
+
+    return target->second;
 }
 
 double& PolynomialMap::coff(int i) {
-	// TODO
-	static double ERROR; // you should delete this line
-	return ERROR; // you should return a correct value
+	return m_Polynomial[i];
 }
 
 void PolynomialMap::compress() {
-	// TODO
+    for (auto it = m_Polynomial.begin(); it != m_Polynomial.end(); ) {
+        if (fabs(it->second) < eps) {
+            it = m_Polynomial.erase(it); 
+        } else {
+            ++it;
+        }
+    }
 }
 
 PolynomialMap PolynomialMap::operator+(const PolynomialMap& right) const {
-	// TODO
-	return {}; // you should return a correct value
+    auto poly(*this);
+    for (const auto& term:right.m_Polynomial){
+        poly.coff(term.first)+=term.second;
+    }
+    poly.compress();
+    return poly;
 }
 
 PolynomialMap PolynomialMap::operator-(const PolynomialMap& right) const {
-	// TODO
-	return {}; // you should return a correct value
+    auto poly(*this);
+    for (const auto& term:right.m_Polynomial){
+        poly.coff(term.first)-=term.second;
+    }
+    poly.compress();
+    return poly;
 }
 
 PolynomialMap PolynomialMap::operator*(const PolynomialMap& right) const {
-	// TODO
-	return {}; // you should return a correct value
+    PolynomialMap poly;
+    for (const auto& term1:this->m_Polynomial){
+        for (const auto& term2:right.m_Polynomial){
+            poly.coff(term1.first+term2.first)+=term1.second*term2.second;
+        }
+    }
+    poly.compress();
+    return poly;
 }
 
 PolynomialMap& PolynomialMap::operator=(const PolynomialMap& right) {
-	// TODO
-	return *this;
+    m_Polynomial=right.m_Polynomial;
+    return *this;
 }
 
 void PolynomialMap::Print() const {
-	// TODO
+    if (m_Polynomial.empty()){
+        cout<<0<<endl;
+        return;
+    }
+    for (auto it=m_Polynomial.begin();it!=m_Polynomial.end();++it){
+        if (it!=m_Polynomial.begin()){
+            cout<<" ";
+            if (it->second>0){
+                cout<<"+";
+            }
+        }
+        cout<<it->second;
+        if (it->first>0){
+            cout<<"x^"<<it->first;
+        }
+    }
+    cout<<endl;
 }
 
 bool PolynomialMap::ReadFromFile(const string& file) {
     m_Polynomial.clear();
-	// TODO
-	return false; // you should return a correct value
+    ifstream fin(file);
+    if (!fin.is_open()){
+        cout<<"Error:Can't open file"<<endl;
+        return false;
+    }
+    char type;
+    int nTerm;
+    fin>>type>>nTerm;
+    assert(type=='P');
+
+    if (type!='P'){
+        cout<<"Error: Invalid input format. Missing symbol \"P\"."<<endl;
+        return false;
+    }
+
+    for (int i=0;i<nTerm;++i){
+        int first;
+        double second;
+        fin>>first>>second;
+        coff(first)=second;
+    }
+    fin.close();
+    compress();
+    return true;
 }
