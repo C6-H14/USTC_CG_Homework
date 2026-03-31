@@ -130,4 +130,4 @@ $$ w _ j = \frac{w _ j}{\displaystyle \sum_k w_k }.$$
 
 <img src="images/README/2026-03-31-13-54-06-image.png" title="" alt="" data-align="center">
 
-<img src="images/README/2026-03-31-13-54-46-image.png" title="" alt="" data-align="center">
+![](images/README/2026-03-31-13-54-46-image.png)
