@@ -1,4 +1,4 @@
-# 4. 曲面参数化 Tutte Parameterzation
+# 5. 曲面参数化 Tutte Parameterzation
 
 ## 作业步骤：
 
