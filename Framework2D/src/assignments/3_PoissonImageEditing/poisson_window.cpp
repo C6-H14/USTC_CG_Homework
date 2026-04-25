@@ -61,9 +61,12 @@ void PoissonWindow::draw_toolbar()
         if (ImGui::MenuItem("Restore") && p_target_)
         {
             p_target_->restore();
+            if (p_source_)
+            {
+                p_source_->clear_selection();
+            }
         }
         add_tooltips("Replace the target image with back up data.");
-
         ImGui::Separator();
 
         static bool selectable = false;
@@ -93,6 +96,36 @@ void PoissonWindow::draw_toolbar()
             "clone the selected region to the target image.");
         // HW3_TODO: You may add more items in the menu for the different types
         // of Poisson editing.
+        if (ImGui::MenuItem("Seamless Clone")) {
+            p_target_->set_seamless();
+        }
+
+        ImGui::Separator();
+        
+        if (p_source_)
+        {
+            static int draw_mode = 0; // 对应 RegionType 枚举
+            const char* modes[] = { "Default", "Rectangle", "Polygon", "Freehand" };
+            
+            if (ImGui::BeginCombo("Mode", modes[draw_mode]))
+            {
+                for (int n = 0; n < 4; n++)
+                {
+                    bool is_selected = (draw_mode == n);
+                    if (ImGui::Selectable(modes[n], is_selected))
+                    {
+                        draw_mode = n;
+                        p_source_->set_draw_mode(static_cast<SourceImageWidget::RegionType>(n));
+                    }
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            add_tooltips(
+                "Select drawing mode: Default (no drawing), Rectangle, "
+                "Polygon (right-click to finish), Freehand (drag to draw).");
+        }
 
         ImGui::EndMainMenuBar();
     }

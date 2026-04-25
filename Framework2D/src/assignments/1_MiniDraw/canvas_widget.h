@@ -35,6 +35,8 @@ class Canvas : public Widget
     void set_default();
     void set_line();
     void set_rect();
+    void set_ellipse();
+    void set_polygon();
     // HW1_TODO: more shape types.
 
     // Clears all shapes from the canvas.
@@ -55,6 +57,7 @@ class Canvas : public Widget
     void mouse_click_event();
     void mouse_move_event();
     void mouse_release_event();
+    void mouse_right_click_event();
 
     // Calculates mouse's relative position in the canvas.
     ImVec2 mouse_pos_in_canvas() const;

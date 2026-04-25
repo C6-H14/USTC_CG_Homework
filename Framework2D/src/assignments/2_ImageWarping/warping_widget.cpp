@@ -1,7 +1,11 @@
 #include "warping_widget.h"
 
 #include <cmath>
-#include <iostream>
+#include <algorithm>
+#include "warper/IDW_warper.h"
+#include "warper/RBF_warper.h"
+#include "warper/warper.h"
+
 
 namespace USTC_CG
 {
@@ -106,23 +110,57 @@ void WarpingWidget::gray_scale()
     // After change the image, we should reload the image data to the renderer
     update();
 }
+inline void WarpingWidget::bilinear_sample(const unsigned char* src_data, int width, int height, int channels,
+                            float src_x, float src_y, 
+                            unsigned char* dst_data, int dst_idx) const 
+{
+    src_x = std::clamp(src_x, 0.0f, static_cast<float>(width - 1));
+    src_y = std::clamp(src_y, 0.0f, static_cast<float>(height - 1));
+
+    int x0 = static_cast<int>(src_x);
+    int y0 = static_cast<int>(src_y);
+    int x1 = std::min(x0 + 1, width - 1);
+    int y1 = std::min(y0 + 1, height - 1); 
+
+    float u = src_x - x0;
+    float v = src_y - y0;
+
+    int idx00 = (y0 * width + x0) * channels;
+    int idx10 = (y0 * width + x1) * channels;
+    int idx01 = (y1 * width + x0) * channels;
+    int idx11 = (y1 * width + x1) * channels;
+
+    for (int ch = 0; ch < channels; ++ch) {
+        float c00 = src_data[idx00 + ch];
+        float c10 = src_data[idx10 + ch];
+        float c01 = src_data[idx01 + ch];
+        float c11 = src_data[idx11 + ch];
+
+        float top_mix = c00 + u * (c10 - c00);
+        float bot_mix = c01 + u * (c11 - c01);
+        
+        float final_color = top_mix + v * (bot_mix - top_mix);
+
+        dst_data[dst_idx + ch] = static_cast<unsigned char>(final_color + 0.5f);
+    }
+}
 void WarpingWidget::warping()
 {
-    // HW2_TODO: You should implement your own warping function that interpolate
-    // the selected points.
-    // Please design a class for such warping operations, utilizing the
-    // encapsulation, inheritance, and polymorphism features of C++. 
+    if (!data_ || data_->width() <= 0 || data_->height() <= 0) { //无图可变形
+        return;
+    }
+    // 没有画任何线
+    if (start_points_.empty() && warping_type_ != kFisheye) {
+        return; 
+    }
 
     // Create a new image to store the result
     Image warped_image(*data_);
-    // Initialize the color of result image
-    for (int y = 0; y < data_->height(); ++y)
-    {
-        for (int x = 0; x < data_->width(); ++x)
-        {
-            warped_image.set_pixel(x, y, { 0, 0, 0 });
-        }
-    }
+    std::memset(warped_image.data(), 0, warped_image.width() * warped_image.height() * warped_image.channels());
+    std::shared_ptr<Warper> warper = nullptr;
+    int width = data_->width();
+    int height = data_->height();
+    int channels = data_->channels();
 
     switch (warping_type_)
     {
@@ -154,26 +192,118 @@ void WarpingWidget::warping()
             }
             break;
         }
-        case kIDW:
-        {
-            // HW2_TODO: Implement the IDW warping
-            // use selected points start_points_, end_points_ to construct the map
-            std::cout << "IDW not implemented." << std::endl;
+        case kIDW:{
+            warper = std::make_shared<IDWWarper>();
             break;
         }
-        case kRBF:
-        {
-            // HW2_TODO: Implement the RBF warping
-            // use selected points start_points_, end_points_ to construct the map
-            std::cout << "RBF not implemented." << std::endl;
+        case kRBF:{
+            std::shared_ptr<RBFWarper> rbf_warper = std::make_shared<RBFWarper>();
+            rbf_warper->set_kernel_type(this->rbf_kernel_type_); 
+            warper = rbf_warper; 
             break;
         }
         default: break;
     }
+    if (warper) 
+    {
+        //角落固定
+        std::vector<ImVec2> augmented_start = start_points_;
+        std::vector<ImVec2> augmented_end = end_points_;
 
+        float fw = static_cast<float>(width - 1);
+        float fh = static_cast<float>(height - 1);
+        ImVec2 corners[4] = {
+            ImVec2(0.0f, 0.0f), ImVec2(fw, 0.0f),
+            ImVec2(0.0f, fh),   ImVec2(fw, fh)
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            augmented_start.push_back(corners[i]);
+            augmented_end.push_back(corners[i]);
+        }
+
+        // 1. 预计算反向映射场 
+        warper->build(augmented_end, augmented_start); 
+
+        // 2. 拿到直接内存指针
+        const unsigned char* src_data = data_->data(); 
+        unsigned char* dst_data = warped_image.data();
+
+        // 3. 执行核心渲染 
+        if (use_mesh_acceleration_) {
+            apply_mesh_warping(warper, src_data, dst_data, width, height, channels);
+        } else {
+            apply_pixel_warping(warper, src_data, dst_data, width, height, channels);
+        }
+    }
     *data_ = std::move(warped_image);
     update();
 }
+
+// 逐像素RBF/IDW渲染
+void WarpingWidget::apply_pixel_warping(const std::shared_ptr<Warper>& warper, 
+                                        const unsigned char* src_data, unsigned char* dst_data, 
+                                        int width, int height, int channels) const 
+{
+    #pragma omp parallel for
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            // 注意：最好加上 static_cast<float>，消除 int 到 float 的隐式转换警告
+            ImVec2 src_pos = warper->warp(ImVec2(static_cast<float>(x), static_cast<float>(y)));
+            int dst_idx = (y * width + x) * channels;
+            
+            bilinear_sample(src_data, width, height, channels, 
+                            src_pos.x, src_pos.y, 
+                            dst_data, dst_idx);
+        }
+    }
+}
+
+// 网格细分与双线性插值
+void WarpingWidget::apply_mesh_warping(const std::shared_ptr<Warper>& warper, 
+                                       const unsigned char* src_data, unsigned char* dst_data, 
+                                       int width, int height, int channels) const 
+{
+    int grid_cols = (width + MESH_GRID_SIZE - 1) / MESH_GRID_SIZE + 1;
+    int grid_rows = (height + MESH_GRID_SIZE - 1) / MESH_GRID_SIZE + 1;
+    
+    // 预计算网格顶点的原图坐标
+    std::vector<std::vector<ImVec2>> grid_src_pos(grid_rows, std::vector<ImVec2>(grid_cols));
+    for (int r = 0; r < grid_rows; ++r) {
+        for (int c = 0; c < grid_cols; ++c) {
+            grid_src_pos[r][c] = warper->warp(ImVec2(static_cast<float>(c * MESH_GRID_SIZE), 
+                                                     static_cast<float>(r * MESH_GRID_SIZE)));
+        }
+    }
+
+    // 内部像素极速插值
+    #pragma omp parallel for
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int c = x / MESH_GRID_SIZE;
+            int r = y / MESH_GRID_SIZE;
+            float u = static_cast<float>(x % MESH_GRID_SIZE) / MESH_GRID_SIZE;
+            float v = static_cast<float>(y % MESH_GRID_SIZE) / MESH_GRID_SIZE;
+
+            ImVec2 p00 = grid_src_pos[r][c];         
+            ImVec2 p10 = grid_src_pos[r][c + 1];     
+            ImVec2 p01 = grid_src_pos[r + 1][c];     
+            ImVec2 p11 = grid_src_pos[r + 1][c + 1]; 
+
+            float src_pos_x = (p00.x + u * (p10.x - p00.x)) * (1.0f - v) + 
+                              (p01.x + u * (p11.x - p01.x)) * v;
+            float src_pos_y = (p00.y + u * (p10.y - p00.y)) * (1.0f - v) + 
+                              (p01.y + u * (p11.y - p01.y)) * v;
+
+            int dst_idx = (y * width + x) * channels;
+            
+            bilinear_sample(src_data, width, height, channels, 
+                            src_pos_x, src_pos_y, 
+                            dst_data, dst_idx);
+        }
+    }
+}
+
 void WarpingWidget::restore()
 {
     *data_ = *back_up_;
@@ -278,4 +408,7 @@ WarpingWidget::fisheye_warping(int x, int y, int width, int height)
 
     return { new_x, new_y };
 }
+void WarpingWidget::set_rbf_kernel_type(int type) {
+        rbf_kernel_type_ = type;
+    }
 }  // namespace USTC_CG
