@@ -1,0 +1,6 @@
+build/
+Binaries/
+.cache/
+.vs/
+out/
+__pycache__/

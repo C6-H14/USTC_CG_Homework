@@ -1,0 +1,11 @@
+RUZINO_ADD_LIB(
+	GPUContext
+	SHARED
+	PUBLIC_LIBS RHI
+	PRIVATE_LIBS spdlog::spdlog nodes_core
+	COMPILE_DEFS
+		NOMINMAX 
+		RUZINO_BACKEND_NVRHI
+)
+
+target_compile_definitions(GPUContext INTERFACE RUZINO_BACKEND_NVRHI)

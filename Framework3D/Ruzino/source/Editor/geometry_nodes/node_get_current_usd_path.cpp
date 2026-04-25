@@ -1,0 +1,20 @@
+#include <pxr/usd/usd/stage.h>
+
+#include "GCore/Components/MeshComponent.h"
+#include "geom_node_base.h"
+
+NODE_DEF_OPEN_SCOPE
+NODE_DECLARATION_FUNCTION(get_current_usd_path)
+{
+    //    b.add_input<bool>("Print log").default_val(false);
+    b.add_output<std::string>("USD file path");
+}
+NODE_EXECUTION_FUNCTION(get_current_usd_path)
+{
+    auto& global_payload = params.get_global_payload<GeomPayload&>();
+    params.set_output("USD file path", global_payload.stage_filepath_);
+    return true;
+}
+NODE_DECLARATION_UI(get_current_usd_path);
+// NODE_DECLARATION_REQUIRED(get_current_usd_path);
+NODE_DEF_CLOSE_SCOPE

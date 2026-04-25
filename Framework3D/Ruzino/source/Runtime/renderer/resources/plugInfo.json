@@ -1,0 +1,22 @@
+{
+  "Plugins": [
+    {
+      "Info": {
+        "Types": {
+          "Hd_RUZINO_RendererPlugin": {
+            "bases": [
+              "HdRendererPlugin"
+            ],
+            "displayName": "RUZINO Renderer",
+            "priority": 1
+          }
+        }
+      },
+      "LibraryPath": "../../hd_RUZINO.dll",
+      "Name": "RUZINO Renderer",
+      "ResourcePath": "resources",
+      "Root": "..",
+      "Type": "library"
+    }
+  ]
+}

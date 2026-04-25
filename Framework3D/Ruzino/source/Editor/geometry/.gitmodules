@@ -1,0 +1,12 @@
+[submodule "external/glm"]
+	path = external/glm
+	url = https://github.com/USTC-CG-NEXT/glm.git
+[submodule "external/libigl"]
+	path = external/libigl
+	url = https://github.com/libigl/libigl.git
+[submodule "external/OpenMesh"]
+	path = external/OpenMesh
+	url = https://gitlab.vci.rwth-aachen.de:9000/OpenMesh/OpenMesh.git
+[submodule "external/OpenVolumeMesh"]
+	path = external/OpenVolumeMesh
+	url = https://gitlab.vci.rwth-aachen.de:9000/OpenVolumeMesh/OpenVolumeMesh.git

@@ -1,0 +1,8 @@
+# add_subdirectory(optimization)
+add_subdirectory(hd_RUZINO_GL)
+add_subdirectory(hd_RUZINO_Embree)
+# add_subdirectory(hd_RUZINO_Embree_MF)
+add_subdirectory(light_field)
+add_subdirectory(BPM)
+add_subdirectory(TreeGen)
+add_subdirectory(TerrainGen)
