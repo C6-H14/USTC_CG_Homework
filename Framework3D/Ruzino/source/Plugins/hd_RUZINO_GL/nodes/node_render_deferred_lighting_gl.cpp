@@ -1,5 +1,3 @@
-// #define __GNUC__
-
 #include "../camera.h"
 #include "../light.h"
 #include "nodes/core/def/node_def.hpp"
@@ -9,6 +7,8 @@
 #include "render_node_base.h"
 #include "rich_type_buffer.hpp"
 #include "utils/draw_fullscreen.h"
+#include "pxr/base/gf/frustum.h" // 必须保留
+
 NODE_DEF_OPEN_SCOPE
 
 NODE_DECLARATION_FUNCTION(deferred_lighting)
@@ -18,13 +18,16 @@ NODE_DECLARATION_FUNCTION(deferred_lighting)
     b.add_input<GLTextureHandle>("MetallicRoughness");
     b.add_input<GLTextureHandle>("Normal");
     b.add_input<GLTextureHandle>("Shadow Maps");
-
-    b.add_input<std::string>("Lighting Shader")
-        .default_val("shaders/blinn_phong.fs");
+    
+    // 保留 Cursor 加的 SSAO 接口，这样你在界面上可以不连线也不报错
+    b.add_input<GLTextureHandle>("SSAO_Map");
+    
+    b.add_input<std::string>("Lighting Shader").default_val("shaders/blinn_phong.fs");
     b.add_output<GLTextureHandle>("Color");
 }
 
-struct LightInfo {
+// 保留 Cursor 加的显存对齐，这对性能有微小提升
+struct alignas(16) LightInfo {
     GfMatrix4f light_projection;
     GfMatrix4f light_view;
     GfVec3f position;
@@ -35,20 +38,35 @@ struct LightInfo {
 
 NODE_EXECUTION_FUNCTION(deferred_lighting)
 {
-    // Fetch all the information
+    GLTextureHandle position_texture;
+    GLTextureHandle diffuseColor_texture;
+    GLTextureHandle metallic_roughness;
+    GLTextureHandle normal_texture;
+    GLTextureHandle shadow_maps;
+    std::string shaderPath;
 
-    auto position_texture = params.get_input<GLTextureHandle>("Position");
-    auto diffuseColor_texture =
-        params.get_input<GLTextureHandle>("diffuseColor");
+    // 保留极其安全的 try-catch 读取机制
+    try {
+        position_texture = params.get_input<GLTextureHandle>("Position");
+        diffuseColor_texture = params.get_input<GLTextureHandle>("diffuseColor");
+        metallic_roughness = params.get_input<GLTextureHandle>("MetallicRoughness");
+        normal_texture = params.get_input<GLTextureHandle>("Normal");
+        shadow_maps = params.get_input<GLTextureHandle>("Shadow Maps");
+        shaderPath = params.get_input<std::string>("Lighting Shader");
+    } catch (...) {
+        return false;
+    }
 
-    auto metallic_roughness =
-        params.get_input<GLTextureHandle>("MetallicRoughness");
-    auto normal_texture = params.get_input<GLTextureHandle>("Normal");
-
-    auto shadow_maps = params.get_input<GLTextureHandle>("Shadow Maps");
+    if (!position_texture || !diffuseColor_texture || !metallic_roughness ||
+        !normal_texture || !shadow_maps) {
+        return false;
+    }
 
     Hd_RUZINO_Camera* free_camera = get_free_camera(params);
-    // Creating output textures.
+    if (!free_camera) {
+        return false;
+    }
+    
     auto size = position_texture->desc.size;
     GLTextureDesc color_output_desc;
     color_output_desc.format = HdFormatFloat32Vec4;
@@ -58,17 +76,15 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
     unsigned int VBO, VAO;
     CreateFullScreenVAO(VAO, VBO);
 
-    auto shaderPath = params.get_input<std::string>("Lighting Shader");
-
     GLShaderDesc shader_desc;
     shader_desc.set_vertex_path(
         std::filesystem::path(RENDER_NODES_FILES_DIR) /
         std::filesystem::path("shaders/fullscreen.vs"));
-
     shader_desc.set_fragment_path(
         std::filesystem::path(RENDER_NODES_FILES_DIR) /
         std::filesystem::path(shaderPath));
     auto shader = resource_allocator.create(shader_desc);
+    
     GLuint framebuffer;
     glGenFramebuffers(1, &framebuffer);
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
@@ -81,6 +97,7 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
 
     glClearColor(0.f, 0.f, 0.f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    
     shader->shader.use();
     shader->shader.setVec2("iResolution", size);
 
@@ -103,36 +120,57 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
     shader->shader.setInt("position", 4);
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, position_texture->texture_id);
-
-    GfVec3f camPos =
-        GfMatrix4f(free_camera->GetTransform()).ExtractTranslation();
+    
+    try {
+        auto ssao_map = params.get_input<GLTextureHandle>("SSAO_Map");
+        if (ssao_map) {
+            shader->shader.setInt("ssaoMap", 5);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_2D, ssao_map->texture_id);
+        }
+    } catch (...) {
+    }
+    
+    GfVec3f camPos = GfMatrix4f(free_camera->GetTransform()).ExtractTranslation();
     shader->shader.setVec3("camPos", camPos);
 
     GLuint lightBuffer;
     glGenBuffers(1, &lightBuffer);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, lightBuffer);
     glViewport(0, 0, size[0], size[1]);
+    
     std::vector<LightInfo> light_vector;
 
     for (int i = 0; i < lights.size(); ++i) {
-        if (!lights[i]->GetId().IsEmpty()) {
-            GlfSimpleLight light_params =
-                lights[i]->Get(HdTokens->params).Get<GlfSimpleLight>();
+        if (lights[i] && !lights[i]->GetId().IsEmpty()) {
+            GlfSimpleLight light_params = lights[i]->Get(HdTokens->params).Get<GlfSimpleLight>();
             auto diffuse4 = light_params.GetDiffuse();
             pxr::GfVec3f diffuse3(diffuse4[0], diffuse4[1], diffuse4[2]);
             auto position4 = light_params.GetPosition();
             pxr::GfVec3f position3(position4[0], position4[1], position4[2]);
 
             if (lights[i]->Get(HdLightTokens->radius).IsHolding<float>()) {
-                auto radius =
-                    lights[i]->Get(HdLightTokens->radius).Get<float>();
+                auto radius = lights[i]->Get(HdLightTokens->radius).Get<float>();
 
+                // 🌟 终极修复：把视锥体和转置加回来！绝不生成多余的光源！
+                GfMatrix4f light_view_mat = GfMatrix4f().SetLookAt(
+                    position3, GfVec3f(0, 0, 0), GfVec3f(0, 0, 1));
+                
+                pxr::GfFrustum frustum;
+                frustum.SetPerspective(90.f, 1.0, 0.1f, 1000.f);
+                GfMatrix4f light_projection_mat = GfMatrix4f(frustum.ComputeProjectionMatrix());
+
+                // 【核心警告】：千万只能 emplace_back 一次！而且必须带 GetTranspose()！
                 light_vector.emplace_back(
-                    GfMatrix4f(), GfMatrix4f(), position3, 0.f, diffuse3, i);
+                    LightInfo{
+                        light_projection_mat.GetTranspose(), 
+                        light_view_mat.GetTranspose(), 
+                        position3, 
+                        radius, 
+                        diffuse3, 
+                        i
+                    });
             }
-
-            // You can add directional light here, and also the corresponding
-            // shadow map calculation part.
         }
     }
 
@@ -151,12 +189,12 @@ NODE_EXECUTION_FUNCTION(deferred_lighting)
 
     DestroyFullScreenVAO(VAO, VBO);
 
+    auto shader_error = shader->shader.get_error();
     resource_allocator.destroy(shader);
     glDeleteBuffers(1, &lightBuffer);
     glDeleteFramebuffers(1, &framebuffer);
     params.set_output("Color", color_texture);
-
-    auto shader_error = shader->shader.get_error();
+    
     if (!shader_error.empty()) {
         return false;
     }

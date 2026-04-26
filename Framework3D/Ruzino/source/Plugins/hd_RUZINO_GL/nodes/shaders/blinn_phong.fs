@@ -1,61 +1,94 @@
 #version 430 core
 
-// Define a uniform struct for lights
 struct Light {
-    // The matrices are used for shadow mapping. You need to fill it according to how we are filling it when building the normal maps (node_render_shadow_mapping.cpp). 
-    // Now, they are filled with identity matrix. You need to modify C++ code innode_render_deferred_lighting.cpp.
-    // Position and color are filled.
     mat4 light_projection;
     mat4 light_view;
     vec3 position;
     float radius;
-    vec3 color; // Just use the same diffuse and specular color.
+    vec3 color; 
     int shadow_map_id;
 };
 
 layout(binding = 0) buffer lightsBuffer {
-Light lights[4];
+    Light lights[4];
 };
 
 uniform vec2 iResolution;
-
 uniform sampler2D diffuseColorSampler;
-uniform sampler2D normalMapSampler; // You should apply normal mapping in rasterize_impl.fs
+uniform sampler2D normalMapSampler;
 uniform sampler2D metallicRoughnessSampler;
 uniform sampler2DArray shadow_maps;
 uniform sampler2D position;
+// uniform sampler2D ssaoMap; // 暂时屏蔽，防未连线报错
 
-// uniform float alpha;
 uniform vec3 camPos;
-
 uniform int light_count;
 
 layout(location = 0) out vec4 Color;
 
 void main() {
-vec2 uv = gl_FragCoord.xy / iResolution;
+    vec2 uv = gl_FragCoord.xy / iResolution;
 
-vec3 pos = texture2D(position,uv).xyz;
-vec3 normal = texture2D(normalMapSampler,uv).xyz;
+    vec3 pos = texture(position, uv).xyz;
+    vec3 normal = texture(normalMapSampler, uv).xyz;
+    vec4 metalnessRoughness = texture(metallicRoughnessSampler, uv);
+    float metal = metalnessRoughness.x;
+    float roughness = metalnessRoughness.y;
+    vec3 albedo = texture(diffuseColorSampler, uv).rgb;
+Color = vec4(albedo, 1.0);
+    return;
+    // 剔除天空背景
+    if (length(normal) < 0.1) {
+        Color = vec4(albedo, 1.0);
+        return;
+    }
 
-vec4 metalnessRoughness = texture2D(metallicRoughnessSampler,uv);
-float metal = metalnessRoughness.x;
-float roughness = metalnessRoughness.y;
+    vec3 N = normalize(normal);
+    vec3 V = normalize(camPos - pos);
 
-for(int i = 0; i < light_count; i ++) {
+    vec3 final_color = albedo * 0.05; // 基础环境光
 
-float shadow_map_value = texture(shadow_maps, vec3(uv, lights[i].shadow_map_id)).x;
-Color = vec4(0,0,0,1);
-// Visualization of shadow map
-Color += vec4(shadow_map_value, 0, 0, 1);
+    for(int i = 0; i < light_count; i++) {
+        vec3 light_pos = lights[i].position;
+        vec3 light_color = lights[i].color;
 
-// HW6_TODO: first comment the line above ("Color +=..."). That's for quick Visualization.
-// You should first do the Blinn Phong shading here. You can use roughness to modify alpha. Or you can pass in an alpha value through the uniform above.
+        vec3 L = normalize(light_pos - pos);
+        float dist = length(light_pos - pos);
+        float attenuation = 1.0 / (dist * dist + 0.0001);
 
-// After finishing Blinn Phong shading, you can do shadow mapping with the help of the provided shadow_map_value. You will need to refer to the node, node_render_shadow_mapping.cpp, for the light matrices definition. Then you need to fill the mat4 light_projection; mat4 light_view; with similar approach that we fill position and color.
-// For shadow mapping, as is discussed in the course, you should compare the value "position depth from the light's view" against the "blocking object's depth.", then you can decide whether it's shadowed.
+        float diff = max(dot(N, L), 0.0);
+        vec3 diffuse = diff * albedo * light_color * attenuation;
 
-// PCSS is also applied here.
-}
+        vec3 H = normalize(L + V);
+        float shininess = max(2.0, pow(2.0, 10.0 * (1.0 - roughness))); 
+        float spec = pow(max(dot(N, H), 0.0), shininess);
+        vec3 spec_color = mix(vec3(0.04), albedo, metal);
+        vec3 specular = spec * spec_color * light_color * attenuation;
 
+        // 🌟 极简版硬阴影 (Hard Shadow)，去除一切容易报错的循环和采样
+        float shadow = 1.0;
+        vec4 fragPosLightSpace = lights[i].light_projection * lights[i].light_view * vec4(pos, 1.0);
+        vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+        projCoords = projCoords * 0.5 + 0.5;
+
+        if(projCoords.z >= 0.0 && projCoords.z <= 1.0 && 
+           projCoords.x >= 0.0 && projCoords.x <= 1.0 && 
+           projCoords.y >= 0.0 && projCoords.y <= 1.0) 
+        {
+            float currentDepth = projCoords.z;
+            float closestDepth = texture(shadow_maps, vec3(projCoords.xy, lights[i].shadow_map_id)).r;
+            float bias = max(0.05 * (1.0 - dot(N, L)), 0.005); 
+            
+            if(currentDepth > closestDepth + bias) {
+                shadow = 0.0; // 被挡住了
+            }
+        }
+        
+        final_color += (diffuse + specular) * shadow;
+    }
+
+    final_color = final_color / (final_color + vec3(1.0));
+    final_color = pow(final_color, vec3(1.0 / 2.2));
+    
+    Color = vec4(final_color, 1.0);
 }
