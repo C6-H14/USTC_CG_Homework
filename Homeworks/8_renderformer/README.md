@@ -67,7 +67,7 @@
 | (5) | [技术解析 (technology.md)](./technology.md) | 核心技术原理详解 |
 | (6) | 代码框架 [->](../../FrameworkRenderformer/local_renderformer/) | RenderFormer 核心模块，`HW8_TODO` 位于其中 |
 | (7) | 训练入口 [->](../../FrameworkRenderformer/train_course_baseline.py) | 主训练脚本 |
-| (8) | 参考论文 | [RenderFormer: Triangle-Level Relightable Objects with Self-Attention](https://renderformer.github.io/pdfs/renderformer-paper.pdf) |
+| (8) | 参考论文 | [RenderFormer](https://renderformer.github.io/pdfs/renderformer-paper.pdf) |
 
 ## 提交文件格式
 
