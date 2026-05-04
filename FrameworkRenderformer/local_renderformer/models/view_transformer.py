@@ -115,7 +115,57 @@ class ViewTransformer(nn.Module):
         # Variables you must define (used downstream):
         #   ray_tokens, patch_h, patch_w, ray_token_pos
         # =====================================================
-        raise NotImplementedError("HW8_TODO: Ray Bundle Embedding")
+         # [Preparation] Extract geometric dimensions
+        # ray_map: [B, H, W, 3]
+        B, H, W, _ = ray_map.shape
+        p_size = self.config.patch_size
+        patch_h = H // p_size
+        patch_w = W // p_size
+
+        # 1. Apply NeRF Positional Encoding to ray directions
+        # ray_map_pe: [B, H, W, C_vdir]
+        ray_map_pe = self.vdir_pe(ray_map)
+
+        # 2. Patchification via einops (Trap 1 Evaded: Strict spatial topology preservation)
+        # Flatten spatial patches and channels into a single 1D embedding per patch
+        # ray_patches: [B, patch_h * patch_w, p_size * p_size * C_vdir]
+        ray_patches = rearrange(
+            ray_map_pe, 
+            'b (h p1) (w p2) c -> b (h w) (p1 p2 c)', 
+            p1=p_size, 
+            p2=p_size
+        )
+
+        # 3. Linear projection, normalization, and global patch token injection
+        # ray_tokens: [B, N_PATCHES, Latent_Dim]
+        ray_tokens = self.ray_map_encoder(ray_patches)
+        ray_tokens = self.ray_map_encoder_norm(ray_tokens)
+        ray_tokens = ray_tokens + self.ray_map_patch_token  # Broadcasting addition
+
+        # 4. Construct per-patch position vectors from camera origin (Trap 2 Evaded)
+        # camera_o is [B, 3]. The network architecture treats spatial coordinates as 9D (Triangle style).
+        # We must repeat the 3D origin 3 times to form a [B, 9] tensor, then expand to all patches.
+        # ray_token_pos: [B, N_PATCHES, 9]
+        cam_o_9d = camera_o.repeat(1, 3) # [B, 3] -> [B, 9]
+        ray_token_pos = cam_o_9d.unsqueeze(1).expand(-1, patch_h * patch_w, -1)
+
+        # 5. Inject camera position into both ray and triangle tokens (Global Camera Awareness)
+        if self.config.pe_type == 'nerf':
+            # Encode the 9D camera origin
+            # cam_pe: [B, Latent_Dim]
+            cam_pe = self.token_pos_pe_norm(self.pe_token_proj(self.pos_pe(cam_o_9d)))
+            
+            # Add to rays: [B, N_PATCHES, Latent_Dim] + [B, 1, Latent_Dim]
+            ray_tokens = ray_tokens + cam_pe.unsqueeze(1)
+            
+            # Add to triangles (Trap 3 Evaded: Explicit reassignment, NO in-place += operation!)
+            # tri_tokens: [B, N_TRIS, Latent_Dim] + [B, 1, Latent_Dim]
+            tri_tokens = tri_tokens + cam_pe.unsqueeze(1)
+            
+        # Note: If pe_type == 'rope', RoPE is handled mathematically inside the 
+        # TransformerDecoder (which we implemented in attention.py), so no explicit 
+        # addition to tokens is required here.
+        # =====================================================
 
         # do per-ray attention
         if self.config.use_dpt_decoder:

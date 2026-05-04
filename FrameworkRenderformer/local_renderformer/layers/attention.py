@@ -191,7 +191,32 @@ class MultiHeadAttention(nn.Module):
             #   5. Reshape: [B, H, N, D] → [B, N, H*D]
             # Hint: torch.matmul, torch.masked_fill, F.softmax
             # ==============================================================
-            raise NotImplementedError("HW8_TODO: Scaled Dot-Product Attention")
+            # 1. Compute scaling factor
+            scale = 1.0 / (q.size(-1) ** 0.5)
+            
+            # 2. Compute unnormalized attention scores
+            # q: [B, H, src_len, head_dim], k: [B, H, ctx_len, head_dim]
+            # scores: [B, H, src_len, ctx_len]
+            scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+            # 3. Apply mask safely
+            if attn_mask is not None:
+                # CRITICAL: T.A.'s doc states True = valid, False = masked.
+                # PyTorch masked_fill expects True for elements to be replaced.
+                # Therefore, we MUST apply logical negation (~).
+                scores = scores.masked_fill(~attn_mask, float('-inf'))
+
+            # 4. Softmax probability distribution
+            attn_weights = F.softmax(scores, dim=-1)
+
+            # 5. Weighted sum of values
+            # v: [B, H, ctx_len, head_dim] -> attn_output: [B, H, src_len, head_dim]
+            attn_output = torch.matmul(attn_weights, v)
+
+            # 6. Tensor memory rearrangement (Zero-copy where possible)
+            # Revert to [B, src_len, H * head_dim] for linear projection
+            attn_output = attn_output.transpose(1, 2).contiguous().view(bs, src_len, -1)
+            # ==============================================================
         elif ATTN == 'flash_attn':
             # self-attn
             if self.is_self_attn:
@@ -637,7 +662,9 @@ class TransformerEncoder(nn.Module):
             #      freqs_to_cos_sin(rope_freqs, head_dim=self.head_dim)
             #   3. Assign results to rope_cos, rope_sin
             # ==============================================================
-            raise NotImplementedError("HW8_TODO: RoPE Computation")
+            # Extract high-frequency embeddings for scene topology
+            rope_freqs = self.rope_emb.get_triangle_freqs(triangle_pos)
+            rope_cos, rope_sin = freqs_to_cos_sin(rope_freqs, head_dim=self.head_dim)
         else:
             rope_cos = rope_sin = None
 
@@ -649,7 +676,27 @@ class TransformerEncoder(nn.Module):
         #     are set, add a skip connection between those layers.
         # Return the processed sequence x.
         # ===============================================================
-        raise NotImplementedError("HW8_TODO: Self-Attention Encoder Forward")
+        skip_feature = None
+
+        for idx, layer in enumerate(self.layers):
+            layer_num = idx + 1  # 1-based index mapping for configuration alignment
+            
+            # Record skip connection source (Direct reference, avoiding explicit tensor clone)
+            if self.encoder_skip_from_layer == layer_num:
+                skip_feature = x
+                
+            x = layer(
+                query=x,
+                kv=None, # Self-attention utilizes query for K and V
+                src_key_padding_mask=src_key_padding_mask,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin
+            )
+            
+            # Apply residual skip addition
+            if self.encoder_skip_to_layer == layer_num:
+                x = x + skip_feature
+        return x
 
 
 class TransformerDecoder(nn.Module):
@@ -748,7 +795,13 @@ class TransformerDecoder(nn.Module):
             # Assign to: rope_cos, rope_sin (ray) and
             #            rope_ctx_cos, rope_ctx_sin (triangle)
             # ============================================================
-            raise NotImplementedError("HW8_TODO: Decoder RoPE Computation")
+            # 1. Query RoPE (Camera Rays)
+            ray_freqs = self.rope_emb.get_triangle_freqs(ray_pos)
+            rope_cos, rope_sin = freqs_to_cos_sin(ray_freqs, head_dim=self.head_dim)
+            
+            # 2. Context RoPE (Scene Triangles)
+            ctx_freqs = self.rope_emb.get_triangle_freqs(triangle_pos)
+            rope_ctx_cos, rope_ctx_sin = freqs_to_cos_sin(ctx_freqs, head_dim=self.head_dim)
         else:
             rope_cos = rope_sin = rope_ctx_cos = rope_ctx_sin = None
 
@@ -764,6 +817,26 @@ class TransformerDecoder(nn.Module):
         #     in a list: out_list.append([x]) — DPT expects this format.
         # Return x if no intermediates needed, else return the list.
         # ================================================================
-        raise NotImplementedError("HW8_TODO: Cross-Attention Decoder Forward")
+        for idx, layer in enumerate(self.layers):
+            layer_num = idx + 1 # 1-based alignment
+            
+            # Execute Cross-Attention
+            x = layer(
+                query=x,
+                kv=ctx,
+                src_key_padding_mask=src_key_padding_mask,
+                rope_cos=rope_cos,
+                rope_sin=rope_sin,
+                rope_ctx_cos=rope_ctx_cos,
+                rope_ctx_sin=rope_ctx_sin,
+                patch_h=patch_h,
+                patch_w=patch_w
+            )
+            
+            # Feature extraction for Dense Prediction Transformer (DPT) multi-scale fusion
+            if layer_num in out_layers:
+                # Wrapping in list is mandatory for downstream DPT unet architectures
+                out_list.append([x])
+        # ================================================================
 
         return x if not out_list else out_list
