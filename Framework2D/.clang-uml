@@ -1,12 +1,14 @@
+# 适配低版本 clang-uml 的极简配置（100%可解析）
 compilation_database_dir: ./build
 output_directory: diagrams
 diagrams:
-  1_MiniDraw:
-    type: class
+  2_ImageWarping:
+    type: class  # 仅保留低版本支持的核心类型
     glob:
-      - ./src/assignments/1_MiniDraw/main.cpp
-      - ./src/assignments/1_MiniDraw/shapes/*
+      - ./src/assignments/2_ImageWarping/main.cpp
+      - ./src/assignments/2_ImageWarping/**/*
     using_namespace: USTC_CG
     include:
       namespaces:
         - USTC_CG
+    # 完全移除所有低版本不支持的配置项

@@ -10,8 +10,7 @@ class IDWWarper : public Warper
    public:
     IDWWarper() = default;
     virtual ~IDWWarper() = default;
-    // HW2_TODO: Implement the warp(...) function with IDW interpolation
+    ImVec2 warp(const ImVec2& p) const override;
 
-    // HW2_TODO: other functions or variables if you need
 };
 }  // namespace USTC_CG

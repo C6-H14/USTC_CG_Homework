@@ -1,0 +1,710 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-credentials:
+    name: Verify GitHub Credentials
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Check GH_PAT token
+        shell: powershell
+        run: |
+          try {
+            $token = "${{ secrets.GH_PAT }}"
+            if ([string]::IsNullOrEmpty($token)) {
+              Write-Output "ERROR: GH_PAT secret is not set"
+              exit 1
+            }
+            
+            Write-Output "✓ GH_PAT token is configured"
+            
+            # Test token validity and permissions using gh CLI
+            $env:GH_TOKEN = $token
+            
+            try {
+              # Try to get current user info - this tests token validity
+              $output = & gh auth status --show-token 2>&1
+              if ($LASTEXITCODE -eq 0) {
+                Write-Output "✓ Token authentication successful"
+                Write-Output $output
+              } else {
+                Write-Output "⚠ Token validation returned: $output"
+              }
+            } catch {
+              Write-Output "⚠ Could not validate token with gh CLI, but it may still be valid"
+            }
+            
+            # Try to get repo info as additional test
+            try {
+              & gh api user --jq '.login' 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                Write-Output "✓ Token has valid permissions"
+              }
+            } catch {
+              Write-Output "⚠ Could not verify API permissions"
+            }
+            
+            Write-Output "✓ Credentials check passed"
+          } catch {
+            Write-Output "ERROR: Failed to verify credentials - $_"
+            exit 1
+          }
+
+  check-sdk:
+    name: Check if SDK needs rebuild
+    needs: verify-credentials
+    runs-on: [self-hosted, windows]
+    outputs:
+      needs-rebuild: ${{ steps.check.outputs.needs-rebuild }}
+      configure-hash: ${{ steps.check.outputs.configure-hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check SDK status
+        id: check
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $WarningPreference = "SilentlyContinue"
+          $VerbosePreference = "SilentlyContinue"
+          
+          $configureHash = (Get-FileHash configure.py).Hash
+          Write-Output "configure-hash=$configureHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          
+          $needsRebuild = $false
+          
+          # First check if configure.py changed
+          $sdkDir = "SDK"
+          $hashFile = Join-Path $sdkDir ".configure_hash"
+          
+          if (Test-Path -Path $hashFile) {
+            $storedHash = (Get-Content $hashFile -Raw).Trim()
+            if ($storedHash -ne $configureHash) {
+              Write-Output "configure.py changed, SDK rebuild required"
+              $needsRebuild = $true
+            } else {
+              Write-Output "configure.py unchanged, checking if SDK exists in remote Release..."
+              
+              # Check if SDK exists in GitHub Release
+              $tagName = "sdk-$configureHash"
+              $releaseExists = $false
+              
+              # Try to view the release
+              $output = & gh release view $tagName --repo ${{ github.repository }} 2>$null
+              $exitCode = $?
+              if ($exitCode) {
+                Write-Output "Found release with tag: $tagName"
+                $releaseExists = $true
+              } else {
+                Write-Output "Release not found with tag: $tagName"
+              }
+              
+              if ($releaseExists) {
+                Write-Output "SDK exists in remote Release, no rebuild needed"
+                $needsRebuild = $false
+              } else {
+                Write-Output "SDK not found in remote Release, will rebuild and upload"
+                $needsRebuild = $true
+              }
+            }
+          } else {
+            Write-Output "No hash file found, will check if SDK exists in remote Release..."
+            
+            # Check if SDK exists in GitHub Release with current hash
+            $tagName = "sdk-$configureHash"
+            $releaseExists = $false
+            
+            # Try to view the release
+            $output = & gh release view $tagName --repo ${{ github.repository }} 2>$null
+            $exitCode = $?
+            if ($exitCode) {
+              Write-Output "Found release with tag: $tagName"
+              $releaseExists = $true
+            } else {
+              Write-Output "Release not found with tag: $tagName"
+            }
+            
+            if ($releaseExists) {
+              Write-Output "SDK exists in remote Release, will download instead of rebuild"
+              $needsRebuild = $false
+            } else {
+              Write-Output "SDK not found in remote Release, will rebuild and upload"
+              $needsRebuild = $true
+            }
+          }
+          
+          if ($needsRebuild) {
+            Write-Output "needs-rebuild=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "SDK rebuild needed"
+          } else {
+            Write-Output "needs-rebuild=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "SDK is up to date, will restore from Release"
+          }
+          
+          exit 0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+  build-sdk:
+    name: Build SDK
+    needs: [verify-credentials, check-sdk]
+    if: needs.check-sdk.outputs.needs-rebuild == 'true'
+    outputs:
+      configure-hash: ${{ needs.check-sdk.outputs.configure-hash }}
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup MSVC Build Tools
+        shell: cmd
+        run: |
+          REM Try to find and initialize Visual Studio environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          ) else (
+            echo Visual Studio not found at expected locations
+            exit /b 1
+          )
+
+      - name: Enable Windows long path support
+        shell: powershell
+        run: |
+          try {
+            # Enable Git long path support
+            & git config --global core.longpaths true
+            Write-Output "Git long path support enabled"
+            
+            # Enable Windows long path support in registry (if running with admin)
+            # This is commented out as it requires admin, but Git long path should be sufficient
+            # New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Force
+          } catch {
+            Write-Output "Warning: Could not enable long path support: $_"
+          }
+
+      - name: Install Python dependencies
+        shell: powershell
+        run: |
+          Write-Output "Installing Python dependencies..."
+          python -m pip install --upgrade pip
+          python -m pip install requests tqdm
+          Write-Output "✓ Dependencies installed"
+
+      - name: Install project requirements
+        shell: powershell
+        run: |
+          Write-Output "Installing project requirements from requirements.txt..."
+          python -m pip install -r requirements.txt
+          Write-Output "✓ Project requirements installed"
+
+      - name: Build SDK - Debug
+        shell: cmd
+        run: |
+          REM Initialize Visual Studio environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          REM Enable Git long path support
+          git config --global core.longpaths true
+          
+          REM Build SDK - All libraries for Debug variant
+          echo Building SDK with all libraries for Debug variant
+          python configure.py --all --build_variant Debug
+          if %ERRORLEVEL% neq 0 (
+            echo Build failed with error code %ERRORLEVEL%
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Build SDK - Release
+        shell: cmd
+        run: |
+          REM Initialize Visual Studio environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          REM Enable Git long path support
+          git config --global core.longpaths true
+          
+          REM Build SDK - All libraries for Release variant
+          echo Building SDK with all libraries for Release variant
+          python configure.py --all --build_variant Release
+          if %ERRORLEVEL% neq 0 (
+            echo Build failed with error code %ERRORLEVEL%
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Verify SDK build output
+        shell: powershell
+        run: |
+          try {
+            # Check if SDK directory exists and has some content
+            $sdkExists = Test-Path -Path "SDK"
+            $sdkFiles = 0
+            if ($sdkExists) {
+              $sdkFiles = (Get-ChildItem -Path "SDK" -Recurse -ErrorAction SilentlyContinue | Measure-Object).Count
+            }
+            
+            Write-Output "SDK directory exists: $sdkExists"
+            Write-Output "SDK files count: $sdkFiles"
+            
+            if (-not $sdkExists -or $sdkFiles -eq 0) {
+              Write-Output "ERROR: SDK directory is empty or not found!"
+              exit 1
+            }
+          } catch {
+            Write-Error "Error verifying SDK: $_"
+            exit 1
+          }
+
+      - name: Pack SDK
+        shell: powershell
+        run: |
+          Write-Output "Packing SDK..."
+          python configure.py --pack
+          
+          if (Test-Path -Path "SDK/SDK.zip") {
+            $size = (Get-Item "SDK/SDK.zip").Length / 1GB
+            Write-Output "SDK.zip packed successfully - Size: $([Math]::Round($size, 2)) GB"
+          } else {
+            Write-Output "ERROR: SDK.zip not created!"
+            exit 1
+          }
+
+      - name: Store configure hash
+        shell: powershell
+        run: |
+          try {
+            $configureHash = (Get-FileHash configure.py).Hash
+            $hashFile = "SDK/.configure_hash"
+            if (-not (Test-Path -Path "SDK")) {
+              New-Item -ItemType Directory -Path "SDK" -Force | Out-Null
+            }
+            $configureHash | Out-File -FilePath $hashFile -Encoding UTF8 -NoNewline
+            Write-Output "Hash saved: $configureHash"
+          } catch {
+            Write-Error "Error storing hash: $_"
+            exit 1
+          }
+
+      - name: Upload SDK for workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-build
+          path: SDK/SDK.zip
+          retention-days: 7
+
+      - name: Upload SDK to GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          files: SDK/SDK.zip
+          tag_name: sdk-${{ needs.check-sdk.outputs.configure-hash }}
+          body: "SDK build for configure.py hash: ${{ needs.check-sdk.outputs.configure-hash }}"
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: false
+          token: ${{ secrets.GH_PAT }}
+
+  build-without-cuda:
+    name: Build Project (No CUDA)
+    needs: [check-sdk, build-sdk]
+    if: always()
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Download SDK from workflow artifact (if rebuilt)
+        if: needs.check-sdk.outputs.needs-rebuild == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-build
+          path: SDK/
+
+      - name: Download SDK from GitHub Release (if not rebuilt)
+        if: needs.check-sdk.outputs.needs-rebuild == 'false'
+        shell: powershell
+        run: |
+          try {
+            $configureHash = "${{ needs.check-sdk.outputs.configure-hash }}"
+            $tagName = "sdk-$configureHash"
+            $sdkZip = "SDK/SDK.zip"
+            
+            Write-Output "Attempting to download SDK from release with tag: $tagName"
+            New-Item -ItemType Directory -Path "SDK" -Force -ErrorAction SilentlyContinue | Out-Null
+            
+            # Use GH CLI with personal token
+            $env:GH_TOKEN = "${{ secrets.GH_PAT }}"
+            & gh release download $tagName --repo ${{ github.repository }} -p "SDK.zip" -O $sdkZip
+            
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -Path $sdkZip)) {
+              $size = (Get-Item $sdkZip).Length / 1GB
+              Write-Output "SDK downloaded successfully - Size: $([Math]::Round($size, 2)) GB"
+            } else {
+              Write-Output "WARNING: Failed to download SDK from Release, will use existing binaries if available"
+            }
+          } catch {
+            Write-Output "WARNING: Download error - $_"
+          }
+
+      - name: Extract SDK and setup structure for builds
+        shell: cmd
+        run: |
+          REM Extract SDK and setup Binaries structure using configure.py
+          python configure.py --extract-sdk SDK/SDK.zip --build_variant Release
+          if %ERRORLEVEL% neq 0 (
+            echo Failed to extract SDK
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Setup MSVC Build Tools
+        shell: cmd
+        run: |
+          REM Try to find and initialize Visual Studio environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Community edition
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Professional edition
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Enterprise edition
+          ) else (
+            echo WARNING: Visual Studio not found at expected locations
+            echo Continuing anyway - system PATH may have compiler
+          )
+
+      - name: Configure CMake (No CUDA)
+        shell: cmd
+        run: |
+          REM Initialize MSVC environment first
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          REM Configure CMake
+          set buildDir=build_nocuda
+          if exist "%buildDir%" (
+            rmdir /s /q "%buildDir%"
+          )
+          mkdir "%buildDir%"
+          cd /d "%buildDir%"
+          
+          cmake -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DRUZINO_WITH_CUDA=OFF ^
+            -DCMAKE_INSTALL_PREFIX="../install_nocuda" ^
+            ..
+          
+          if %ERRORLEVEL% neq 0 (
+            echo CMake configuration failed
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Build (No CUDA)
+        id: build-nocuda
+        shell: cmd
+        run: |
+          REM Initialize MSVC environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          cd /d build_nocuda
+          cmake --build . --config Release -j
+          if %ERRORLEVEL% neq 0 (
+            echo Build failed with error code %ERRORLEVEL%
+            exit /b %ERRORLEVEL%
+          )
+
+  build-and-test-with-cuda:
+    name: Build & Test Project (With CUDA)
+    needs: [check-sdk, build-sdk]
+    if: always()
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Download SDK from workflow artifact (if rebuilt)
+        if: needs.check-sdk.outputs.needs-rebuild == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-build
+          path: SDK/
+
+      - name: Download SDK from GitHub Release (if not rebuilt)
+        if: needs.check-sdk.outputs.needs-rebuild == 'false'
+        shell: powershell
+        run: |
+          try {
+            $configureHash = "${{ needs.check-sdk.outputs.configure-hash }}"
+            $tagName = "sdk-$configureHash"
+            $sdkZip = "SDK/SDK.zip"
+            
+            Write-Output "Attempting to download SDK from release with tag: $tagName"
+            New-Item -ItemType Directory -Path "SDK" -Force -ErrorAction SilentlyContinue | Out-Null
+            
+            # Use GH CLI with personal token
+            $env:GH_TOKEN = "${{ secrets.GH_PAT }}"
+            & gh release download $tagName --repo ${{ github.repository }} -p "SDK.zip" -O $sdkZip
+            
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -Path $sdkZip)) {
+              $size = (Get-Item $sdkZip).Length / 1GB
+              Write-Output "SDK downloaded successfully - Size: $([Math]::Round($size, 2)) GB"
+            } else {
+              Write-Output "WARNING: Failed to download SDK from Release, will use existing binaries if available"
+            }
+          } catch {
+            Write-Output "WARNING: Download error - $_"
+          }
+
+      - name: Extract SDK and setup structure for Release build
+        shell: cmd
+        run: |
+          REM Extract SDK and setup Binaries structure for Release variant
+          python configure.py --extract-sdk SDK/SDK.zip --build_variant Release
+          if %ERRORLEVEL% neq 0 (
+            echo Failed to extract SDK for Release
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Check CUDA availability
+        id: cuda-check
+        shell: powershell
+        run: |
+          try {
+            $cuda_available = $false
+            
+            # Check CUDA_PATH environment variable
+            if ($env:CUDA_PATH) {
+              Write-Output "Found CUDA_PATH: $env:CUDA_PATH"
+              $cuda_available = $true
+            }
+            
+            # Also check common CUDA installation locations
+            if (-not $cuda_available) {
+              $common_paths = @(
+                "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6",
+                "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5",
+                "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4",
+                "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3"
+              )
+              
+              foreach ($path in $common_paths) {
+                if (Test-Path -Path "$path\bin\nvcc.exe") {
+                  Write-Output "Found CUDA at: $path"
+                  $env:CUDA_PATH = $path
+                  $cuda_available = $true
+                  break
+                }
+              }
+            }
+            
+            if ($cuda_available) {
+              Write-Output "cuda-available=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              Write-Output "CUDA is available"
+              & "$env:CUDA_PATH\bin\nvcc.exe" --version
+            } else {
+              Write-Output "cuda-available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+              Write-Output "CUDA not found"
+            }
+          } catch {
+            Write-Output "cuda-available=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "CUDA check error: $_"
+          }
+
+      - name: Setup MSVC Build Tools
+        shell: cmd
+        run: |
+          REM Try to find and initialize Visual Studio environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Community edition
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Professional edition
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            echo MSVC environment initialized from Enterprise edition
+          ) else (
+            echo WARNING: Visual Studio not found at expected locations
+            echo Continuing anyway - system PATH may have compiler
+          )
+
+      - name: Configure CMake Release (With CUDA)
+        if: steps.cuda-check.outputs.cuda-available == 'true'
+        shell: cmd
+        run: |
+          REM Initialize MSVC environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          set buildDir=build_cuda_release
+          if exist "%buildDir%" (
+            rmdir /s /q "%buildDir%"
+          )
+          mkdir "%buildDir%"
+          cd /d "%buildDir%"
+          
+          cmake -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DRUZINO_WITH_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=75;86;89 ^
+            -DCMAKE_INSTALL_PREFIX="../install_cuda" ^
+            ..
+          
+          if %ERRORLEVEL% neq 0 (
+            echo CMake configuration failed for Release
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: Build (With CUDA)
+        id: build-cuda
+        if: steps.cuda-check.outputs.cuda-available == 'true'
+        shell: cmd
+        run: |
+          REM Initialize MSVC environment
+          if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+          ) else if exist "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          
+          cd /d build_cuda_release
+          cmake --build . --config Release -j
+          if %ERRORLEVEL% neq 0 (
+            echo Release build failed with error code %ERRORLEVEL%
+            exit /b %ERRORLEVEL%
+          )
+
+      - name: CUDA not available
+        if: steps.cuda-check.outputs.cuda-available == 'false'
+        shell: powershell
+        run: |
+          Write-Output "CUDA is not available on this runner"
+          Write-Output "Skipping CUDA build"
+
+      - name: Install Python test dependencies
+        if: steps.cuda-check.outputs.cuda-available == 'true'
+        shell: powershell
+        run: |
+          Write-Output "Installing Python test dependencies..."
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          Write-Output "✓ Test dependencies installed"
+
+      - name: Run all tests
+        id: run-tests
+        if: steps.cuda-check.outputs.cuda-available == 'true'
+        shell: powershell
+        run: |
+          Write-Output "Starting test suite..."
+          python scripts/run_all_tests.py
+          
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "test-status=success" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "✓ All tests passed"
+          } else {
+            Write-Output "test-status=failed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Output "✗ Some tests failed"
+            exit 1
+          }
+
+  summary:
+    name: Build & Test Summary
+    needs: [build-without-cuda, build-and-test-with-cuda]
+    if: always()
+    runs-on: [self-hosted, windows]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Print summary
+        shell: powershell
+        run: |
+          try {
+            Write-Output ""
+            Write-Output "======================================"
+            Write-Output "       BUILD & TEST SUMMARY"
+            Write-Output "======================================"
+            Write-Output "No CUDA build: ${{ needs.build-without-cuda.result }}"
+            Write-Output "CUDA build & test: ${{ needs.build-and-test-with-cuda.result }}"
+            Write-Output "======================================"
+            Write-Output ""
+            
+            $buildSuccess = ("${{ needs.build-without-cuda.result }}" -eq "success" -and "${{ needs.build-and-test-with-cuda.result }}" -eq "success")
+            
+            if ($buildSuccess) {
+              Write-Output "✓ Both builds and tests completed successfully"
+            } else {
+              Write-Output "✗ Some builds or tests failed"
+            }
+            
+            Write-Output "======================================"
+            Write-Output ""
+            
+            if ($buildSuccess) {
+              Write-Output "✓ OVERALL: SUCCESS - All builds and tests passed!"
+              exit 0
+            } else {
+              Write-Output "✗ OVERALL: FAILED"
+              exit 1
+            }
+          } catch {
+            Write-Error "Error in summary: $_"
+            exit 1
+          }

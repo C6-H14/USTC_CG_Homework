@@ -6,6 +6,10 @@ file(GLOB source
   "${CMAKE_CURRENT_SOURCE_DIR}/shapes/*.h" 
 )
 add_executable(${PROJECT_NAME} ${source})
+target_include_directories(${PROJECT_NAME} PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}           # 当前目录
+  ${FRAMEWORK2D_DIR}/../Homeworks/2_image_warping/documents/eigen_example/src/_deps    # warper 子目录
+)
 target_include_directories(${PROJECT_NAME} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(${PROJECT_NAME} PROPERTIES 
   DEBUG_POSTFIX "_d"

@@ -12,8 +12,11 @@ class SourceImageWidget : public ImageWidget
     enum RegionType
     {
         kDefault = 0,
-        kRect = 1
+        kRect = 1,
+        kPolygon = 2,
+        kFreehand = 3
     };
+    void set_draw_mode(RegionType mode) { draw_mode_ = mode; }
 
     explicit SourceImageWidget(
         const std::string& label,
@@ -21,6 +24,7 @@ class SourceImageWidget : public ImageWidget
     virtual ~SourceImageWidget() noexcept = default;
 
     void draw() override;
+    void clear_selection();
 
     // Region selecting interaction
     void enable_selecting(bool flag);
@@ -35,12 +39,15 @@ class SourceImageWidget : public ImageWidget
     // Get the position to locate the region in the target image.
     // We return the start point of the selected region as default.
     ImVec2 get_position() const;
+    void update_mask_from_polygon(const std::vector<ImVec2>& points);
+    RegionType draw_mode_ = kRect;
 
    private:
     // Event handlers for mouse interactions.
     void mouse_click_event();
     void mouse_move_event();
     void mouse_release_event();
+    void mouse_right_click_event();
 
     // Calculates mouse's relative position in the canvas.
     ImVec2 mouse_pos_in_canvas() const;
@@ -58,6 +65,8 @@ class SourceImageWidget : public ImageWidget
     // The **value** of the mask should be 0 or 255: 0 for the background and
     // 255 for the selected region.
     std::shared_ptr<Image> selected_region_mask_;
+    bool is_drawing_ = false; 
+    std::vector<ImVec2> current_points_; // 存储当前正在画的顶点
 
     ImVec2 start_, end_;
     bool flag_enable_selecting_region_ = false;

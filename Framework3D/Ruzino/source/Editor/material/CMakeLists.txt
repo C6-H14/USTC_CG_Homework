@@ -1,0 +1,17 @@
+if(RUZINO_WITH_OPENUSD)
+RUZINO_ADD_LIB(
+	MCore
+	SHARED
+	PUBLIC_LIBS
+		nodes_system
+		nodes_ui_imgui
+		usdMtlx
+		MaterialXGenShader
+	PRIVATE_LIBS 
+		usd
+		usdImaging
+		blueprints
+	COMPILE_DEFS
+		NOMINMAX=1
+)
+endif()

@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+
+
 namespace USTC_CG
 {
 using uchar = unsigned char;
@@ -123,6 +125,17 @@ void TargetImageWidget::clone()
             // each pixel in the selected region, calculate the final RGB color
             // by solving Poisson Equations.
             restore();
+
+            int offset_x = static_cast<int>(mouse_position_.x) - 
+                           static_cast<int>(source_image_->get_position().x);
+            int offset_y = static_cast<int>(mouse_position_.y) - 
+                           static_cast<int>(source_image_->get_position().y);
+            int src_pos_x = static_cast<int>(source_image_->get_position().x);
+            int src_pos_y = static_cast<int>(source_image_->get_position().y);
+            
+            seamless_cloner_->init_solver(mask, src_pos_x, src_pos_y);
+
+            seamless_cloner_->clone_update(source_image_->get_data(), data_, offset_x, offset_y);
 
             break;
         }

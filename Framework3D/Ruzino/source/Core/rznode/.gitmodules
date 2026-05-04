@@ -1,0 +1,9 @@
+[submodule "ext/googletest"]
+	path = ext/googletest
+	url = https://github.com/google/googletest.git
+[submodule "ext/entt"]
+	path = ext/entt
+	url = https://github.com/Jerry-Shen0527/entt.git
+[submodule "ext/spdlog"]
+	path = ext/spdlog
+	url = https://github.com/gabime/spdlog.git

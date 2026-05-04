@@ -2,8 +2,6 @@
 
 #include <ImGuiFileDialog.h>
 
-#include <iostream>
-
 namespace USTC_CG
 {
 ImageWarping::ImageWarping(const std::string& window_name) : Window(window_name)
@@ -87,11 +85,33 @@ void ImageWarping::draw_toolbar()
             p_image_->set_IDW();
         else if (warping_type == 2 && p_image_)
             p_image_->set_RBF();
-        // HW2_TODO: You can add more interactions for IDW, RBF, etc.
+        ImGui::Separator();
+        static bool use_mesh_accel = false;
+        if (ImGui::Checkbox("Mesh Accel", &use_mesh_accel) && p_image_)
+        {
+            p_image_->set_mesh_acceleration(use_mesh_accel);
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Restore") && p_image_)
         {
             p_image_->restore();
+        }
+        if (warping_type == 2) {// Only show RBF kernel options when RBF warping is selected
+            ImGui::Separator();
+            ImGui::Text("RBF Kernel:");
+            static int current_kernel = 0;
+            const char* kernel_names[] = {
+                "Multiquadric",
+                "Inverse Multiquadric",
+                "Gaussian",
+                "Thin Plate Spline" 
+            };
+            if (ImGui::Combo("##kernel_combo", &current_kernel, 
+                             kernel_names, IM_ARRAYSIZE(kernel_names))) {
+                if (p_image_) {
+                    p_image_->set_rbf_kernel_type(current_kernel);
+                }
+            }
         }
         ImGui::EndMainMenuBar();
     }
